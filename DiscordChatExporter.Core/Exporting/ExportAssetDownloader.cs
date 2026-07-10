@@ -90,7 +90,7 @@ internal partial class ExportAssetDownloader(string workingDirPath, bool reuse)
 
 internal partial class ExportAssetDownloader
 {
-    private static string NormalizeUrl(string url)
+    internal static string NormalizeUrl(string url)
     {
         // Remove signature parameters from Discord CDN/media URLs to normalize them
         var uri = new Uri(url);

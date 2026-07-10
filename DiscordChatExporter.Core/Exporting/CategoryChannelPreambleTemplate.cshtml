@@ -1,0 +1,47 @@
+@using System
+@using System.Threading.Tasks
+@using DiscordChatExporter.Core.Discord.Data
+@using RazorBlade
+
+@inherits RazorBlade.HtmlTemplate
+
+@functions {
+    public required ExportContext Context { get; init; }
+
+    public required Channel Channel { get; init; }
+}
+
+@{
+    ValueTask<string> ResolveAssetUrlAsync(string url) =>
+        Context.ResolveAssetUrlAsync(url, CancellationToken);
+
+    async ValueTask<IEncodedContent> FormatMarkdownAsync(string markdown) =>
+        Context.Request.ShouldFormatMarkdown
+            ? Html.Raw(await HtmlMarkdownVisitor.FormatAsync(Context, markdown, true, CancellationToken))
+            : Html.Raw(Html.Encode(markdown));
+}
+
+@* The tab is closed by the writer at the end of the section *@
+<!--wmm:ignore-->
+<div class="chatlog-tab" id="chatlog-tab-@Channel.Id" data-channel-id="@Channel.Id" hidden>
+<!--/wmm:ignore-->
+
+<div class="preamble">
+    <div class="preamble__guild-icon-container">
+        <img class="preamble__guild-icon" src="@await ResolveAssetUrlAsync(Channel.IconUrl ?? Context.Request.Guild.IconUrl)" alt="Guild icon" loading="lazy">
+    </div>
+    <div class="preamble__entries-container">
+        <div class="preamble__entry">@Context.Request.Guild.Name</div>
+        <div class="preamble__entry">@Channel.GetHierarchicalName()</div>
+
+        @if (!string.IsNullOrWhiteSpace(Channel.Topic))
+        {
+            <div class="preamble__entry preamble__entry--small">@(await FormatMarkdownAsync(Channel.Topic))</div>
+        }
+    </div>
+</div>
+
+@* Preamble cuts off at this point *@
+<!--wmm:ignore-->
+<div class="chatlog">
+<!--/wmm:ignore-->

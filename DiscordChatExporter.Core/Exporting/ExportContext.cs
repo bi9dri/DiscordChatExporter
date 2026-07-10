@@ -13,7 +13,11 @@ using PowerKit.Extensions;
 
 namespace DiscordChatExporter.Core.Exporting;
 
-internal class ExportContext(DiscordClient discord, ExportRequest request)
+internal class ExportContext(
+    DiscordClient discord,
+    ExportRequest request,
+    EmbeddedAssetRegistry? assetRegistry = null
+)
 {
     private readonly Dictionary<Snowflake, Member?> _membersById = new();
     private readonly Dictionary<Snowflake, Channel?> _channelsById = new();
@@ -125,6 +129,10 @@ internal class ExportContext(DiscordClient discord, ExportRequest request)
         CancellationToken cancellationToken = default
     )
     {
+        // Embed the asset as a data URI if we're exporting to a self-contained file
+        if (assetRegistry is not null)
+            return await assetRegistry.ResolveAsync(url, cancellationToken);
+
         if (!Request.ShouldDownloadAssets)
             return url;
 
