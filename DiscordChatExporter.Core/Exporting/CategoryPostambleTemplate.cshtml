@@ -1,0 +1,113 @@
+@using System
+@using System.Collections.Generic
+@using System.IO
+@using System.Text
+@using System.Text.Json
+
+@inherits RazorBlade.HtmlTemplate
+
+@functions {
+    public required ExportContext Context { get; init; }
+
+    public required IReadOnlyList<CategoryThreadLink> ThreadLinks { get; init; }
+
+    public required long MessagesWrittenTotal { get; init; }
+
+    // Written with Utf8JsonWriter instead of JsonSerializer, because reflection-based
+    // serialization is disabled when the app is published with trimming.
+    // The default JSON encoder escapes HTML-sensitive characters, so the payload
+    // is safe to embed inside a script element as-is.
+    private string SerializeThreadLinks()
+    {
+        using var buffer = new MemoryStream();
+
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartArray();
+
+            foreach (var link in ThreadLinks)
+            {
+                writer.WriteStartObject();
+                writer.WriteString("threadId", link.ThreadId.ToString());
+                writer.WriteString("parentChannelId", link.ParentChannelId.ToString());
+                writer.WriteString("anchorMessageId", link.AnchorMessageId.ToString());
+                writer.WriteString("name", link.ThreadName);
+                writer.WriteEndObject();
+            }
+
+            writer.WriteEndArray();
+        }
+
+        return Encoding.UTF8.GetString(buffer.ToArray());
+    }
+}
+
+@{
+    var threadLinksJson = SerializeThreadLinks();
+}
+
+<div class="postamble">
+    <div class="postamble__entry">Exported @MessagesWrittenTotal.ToString("n0", Context.Request.CultureInfo) message(s)</div>
+    <div class="postamble__entry">Timezone: UTC@((Context.Request.IsUtcNormalizationEnabled ? 0 : TimeZoneInfo.Local.BaseUtcOffset.TotalHours).ToString("+#.#;-#.#;+0", Context.Request.CultureInfo))</div>
+</div>
+
+@{
+    /* Close the main pane opened by the preamble */
+}
+<!--wmm:ignore-->
+</div>
+<!--/wmm:ignore-->
+
+@* Boot script *@
+<script>
+    function selectTab(tabId) {
+        const tab = document.getElementById(tabId);
+        if (!tab)
+            return;
+
+        document.querySelectorAll('.chatlog-tab').forEach(t => t.hidden = true);
+        tab.hidden = false;
+
+        document.querySelectorAll('.sidebar__item').forEach(
+            i => i.classList.toggle('sidebar__item--active', i.getAttribute('data-target') === tabId)
+        );
+
+        document.querySelector('.main-pane').scrollTop = 0;
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        document.querySelectorAll('.sidebar__item').forEach(
+            i => i.addEventListener('click', () => selectTab(i.getAttribute('data-target')))
+        );
+
+        // Insert links to thread tabs at the positions where the threads were created
+        const threadLinks = @Html.Raw(threadLinksJson);
+        for (const link of threadLinks) {
+            const parentTab = document.getElementById('chatlog-tab-' + link.parentChannelId);
+            const threadTab = document.getElementById('chatlog-tab-' + link.threadId);
+            if (!parentTab || !threadTab)
+                continue;
+
+            // Scope the lookup to the parent tab, because the anchor message
+            // may also appear in the thread's own tab
+            const anchor = parentTab.querySelector('[data-message-id="' + link.anchorMessageId + '"]');
+            if (!anchor)
+                continue;
+
+            const linkElement = document.createElement('div');
+            linkElement.className = 'chatlog__thread-link';
+            linkElement.textContent = '🧵 Thread: ' + link.name + ' →';
+            linkElement.addEventListener('click', () => selectTab(threadTab.id));
+            anchor.insertAdjacentElement('afterend', linkElement);
+        }
+
+        // Show the first tab by default
+        const firstTab = document.querySelector('.chatlog-tab');
+        if (firstTab)
+            selectTab(firstTab.id);
+    });
+</script>
+
+</body>
+
+</html>

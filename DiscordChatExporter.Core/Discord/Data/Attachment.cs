@@ -12,6 +12,7 @@ public partial record Attachment(
     Snowflake Id,
     string Url,
     string FileName,
+    string? Title,
     string? Description,
     int? Width,
     int? Height,
@@ -19,6 +20,11 @@ public partial record Attachment(
 ) : IHasId
 {
     public string FileExtension { get; } = Path.GetExtension(FileName);
+
+    // Discord sanitizes file names that contain non-ASCII characters and keeps the
+    // original name (without the extension) in the title, which is what the UI displays.
+    public string DisplayFileName { get; } =
+        !string.IsNullOrWhiteSpace(Title) ? Title + Path.GetExtension(FileName) : FileName;
 
     public bool IsImage =>
         string.Equals(FileExtension, ".jpg", StringComparison.OrdinalIgnoreCase)
@@ -51,11 +57,12 @@ public partial record Attachment
         var id = json.GetProperty("id").GetNonWhiteSpaceString().Pipe(Snowflake.Parse);
         var url = json.GetProperty("url").GetNonWhiteSpaceString();
         var fileName = json.GetProperty("filename").GetNonNullString();
+        var title = json.GetPropertyOrNull("title")?.GetNonWhiteSpaceStringOrNull();
         var description = json.GetPropertyOrNull("description")?.GetNonWhiteSpaceStringOrNull();
         var width = json.GetPropertyOrNull("width")?.GetInt32OrNull();
         var height = json.GetPropertyOrNull("height")?.GetInt32OrNull();
         var fileSize = json.GetProperty("size").GetInt64().Pipe(FileSize.FromBytes);
 
-        return new Attachment(id, url, fileName, description, width, height, fileSize);
+        return new Attachment(id, url, fileName, title, description, width, height, fileSize);
     }
 }

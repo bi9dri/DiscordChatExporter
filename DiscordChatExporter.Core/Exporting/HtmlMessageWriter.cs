@@ -18,10 +18,10 @@ internal class HtmlMessageWriter(Stream stream, ExportContext context, string th
     private readonly List<Message> _messageGroup = [];
 
     // Note: in reverse order, last message appears earlier than the first message
-    private bool CanJoinGroup(Message message)
+    internal static bool CanJoinGroup(Message message, Message? lastMessage)
     {
         // If the group is empty, any message can join it
-        if (_messageGroup.LastOrDefault() is not { } lastMessage)
+        if (lastMessage is null)
             return true;
 
         // Reply-like messages cannot join existing groups because they need to appear first
@@ -105,7 +105,7 @@ internal class HtmlMessageWriter(Stream stream, ExportContext context, string th
         await base.WriteMessageAsync(message, cancellationToken);
 
         // If the message can be grouped, buffer it for now
-        if (CanJoinGroup(message))
+        if (CanJoinGroup(message, _messageGroup.LastOrDefault()))
         {
             _messageGroup.Add(message);
         }
