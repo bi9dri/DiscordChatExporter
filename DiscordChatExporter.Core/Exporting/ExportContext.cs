@@ -13,24 +13,32 @@ using PowerKit.Extensions;
 
 namespace DiscordChatExporter.Core.Exporting;
 
-internal class ExportContext(
-    DiscordClient discord,
-    ExportRequest request,
-    EmbeddedAssetRegistry? assetRegistry = null
-)
+internal class ExportContext
 {
     private readonly Dictionary<Snowflake, Member?> _membersById = new();
     private readonly Dictionary<Snowflake, Channel?> _channelsById = new();
     private readonly Dictionary<Snowflake, Role> _rolesById = new();
 
-    private readonly ExportAssetDownloader _assetDownloader = new(
-        request.AssetsDirPath,
-        request.ShouldReuseAssets
-    );
+    private readonly DiscordClient _discord;
 
-    public DiscordClient Discord { get; } = discord;
+    private readonly ExportAssetDownloader _assetDownloader;
 
-    public ExportRequest Request { get; } = request;
+    public ExportContext(
+        DiscordClient discord,
+        ExportRequest request,
+        ExportAssetDownloader? assetDownloader = null
+    )
+    {
+        _discord = discord;
+        Request = request;
+        _assetDownloader =
+            assetDownloader
+            ?? new ExportAssetDownloader(request.AssetsDirPath, request.ShouldReuseAssets);
+    }
+
+    public DiscordClient Discord => _discord;
+
+    public ExportRequest Request { get; }
 
     public DateTimeOffset NormalizeDate(DateTimeOffset instant) =>
         Request.IsUtcNormalizationEnabled ? instant.ToUniversalTime() : instant.ToLocalTime();
@@ -129,10 +137,6 @@ internal class ExportContext(
         CancellationToken cancellationToken = default
     )
     {
-        // Embed the asset as a data URI if we're exporting to a self-contained file
-        if (assetRegistry is not null)
-            return await assetRegistry.ResolveAsync(url, cancellationToken);
-
         if (!Request.ShouldDownloadAssets)
             return url;
 
