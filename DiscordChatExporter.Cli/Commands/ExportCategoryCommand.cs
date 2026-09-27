@@ -19,7 +19,7 @@ namespace DiscordChatExporter.Cli.Commands;
 
 [Command(
     "exportcategory",
-    Description = "Exports all text channels in a category into a single self-contained HTML file."
+    Description = "Exports all text channels in a category into a single HTML file with a sidecar directory of assets."
 )]
 public partial class ExportCategoryCommand : DiscordCommandBase
 {

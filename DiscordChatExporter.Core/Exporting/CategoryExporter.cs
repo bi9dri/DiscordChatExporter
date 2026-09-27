@@ -14,8 +14,8 @@ using WebMarkupMin.Core;
 
 namespace DiscordChatExporter.Core.Exporting;
 
-// Exports all text channels and threads of a category into a single
-// self-contained HTML file with all assets embedded.
+// Exports all text channels and threads of a category into an HTML file
+// accompanied by a sidecar directory of downloaded assets.
 public partial class CategoryExporter(DiscordClient discord)
 {
     private readonly HtmlMinifier _minifier = new();
@@ -23,35 +23,22 @@ public partial class CategoryExporter(DiscordClient discord)
     // Use <!--wmm:ignore--> to preserve blocks of code inside the templates
     private string Minify(string html) => _minifier.Minify(html, false).MinifiedContent;
 
-    // Asset placeholders in attributes that the browser fetches during parsing are moved
-    // to data attributes, so that the parser doesn't attempt to load them before the
-    // application script runs on DOMContentLoaded (which would log console errors).
-    private static string NeutralizeAssetPlaceholders(string html) =>
-        html.Replace("src=\"asset://", "data-asset-src=\"asset://")
-            .Replace("poster=\"asset://", "data-asset-poster=\"asset://");
-
     private async ValueTask WriteMessageGroupAsync(
         ExportContext context,
         IReadOnlyList<Message> messages,
-        EmbeddedAssetRegistry registry,
         TextWriter writer,
         CancellationToken cancellationToken
     )
     {
         await writer.WriteLineAsync(
             Minify(
-                NeutralizeAssetPlaceholders(
-                    await new MessageGroupTemplate
-                    {
-                        Context = context,
-                        Messages = messages,
-                    }.RenderAsync(cancellationToken)
-                )
+                await new MessageGroupTemplate
+                {
+                    Context = context,
+                    Messages = messages,
+                }.RenderAsync(cancellationToken)
             )
         );
-
-        // Flush the assets registered while rendering the group
-        await WriteAssetScriptAsync(writer, registry.DrainPendingEntries());
     }
 
     private async ValueTask<long> ExportChannelSectionAsync(
@@ -59,7 +46,7 @@ public partial class CategoryExporter(DiscordClient discord)
         Channel channel,
         IReadOnlyDictionary<Snowflake, Channel> threadsById,
         Dictionary<Snowflake, ThreadAnchor> threadAnchorsByThreadId,
-        EmbeddedAssetRegistry registry,
+        ExportAssetDownloader assetDownloader,
         TextWriter writer,
         IProgress<Percentage>? progress,
         CancellationToken cancellationToken
@@ -71,7 +58,7 @@ public partial class CategoryExporter(DiscordClient discord)
         var context = new ExportContext(
             discord,
             CreateSyntheticRequest(request, channel),
-            registry
+            assetDownloader
         );
 
         var messageGroup = new List<Message>();
@@ -127,17 +114,14 @@ public partial class CategoryExporter(DiscordClient discord)
                 {
                     await writer.WriteLineAsync(
                         Minify(
-                            NeutralizeAssetPlaceholders(
-                                await new CategoryChannelPreambleTemplate
-                                {
-                                    Context = context,
-                                    Channel = channel,
-                                }.RenderAsync(cancellationToken)
-                            )
+                            await new CategoryChannelPreambleTemplate
+                            {
+                                Context = context,
+                                Channel = channel,
+                            }.RenderAsync(cancellationToken)
                         )
                     );
 
-                    await WriteAssetScriptAsync(writer, registry.DrainPendingEntries());
                     isHeaderWritten = true;
                 }
 
@@ -146,13 +130,7 @@ public partial class CategoryExporter(DiscordClient discord)
                     && !HtmlMessageWriter.CanJoinGroup(message, messageGroup[^1])
                 )
                 {
-                    await WriteMessageGroupAsync(
-                        context,
-                        messageGroup,
-                        registry,
-                        writer,
-                        cancellationToken
-                    );
+                    await WriteMessageGroupAsync(context, messageGroup, writer, cancellationToken);
 
                     messageGroup.Clear();
                 }
@@ -166,13 +144,7 @@ public partial class CategoryExporter(DiscordClient discord)
 
         // Flush the last message group
         if (messageGroup.Count > 0)
-            await WriteMessageGroupAsync(
-                context,
-                messageGroup,
-                registry,
-                writer,
-                cancellationToken
-            );
+            await WriteMessageGroupAsync(context, messageGroup, writer, cancellationToken);
 
         // Close the 'chatlog' and 'chatlog-tab' elements opened by the section preamble
         if (isHeaderWritten)
@@ -196,7 +168,14 @@ public partial class CategoryExporter(DiscordClient discord)
         }
 
         var themeName = request.Format == ExportFormat.HtmlDark ? "Dark" : "Light";
-        var registry = new EmbeddedAssetRegistry();
+
+        // A single downloader instance is shared across all sections and the shell, so that
+        // assets appearing in multiple channels are only downloaded once.
+        var assetDownloader = new ExportAssetDownloader(
+            request.AssetsDirPath,
+            reuse: false,
+            convertImagesToWebp: true
+        );
 
         // Each channel is immediately followed by its threads, oldest first
         var sections = new List<Channel>();
@@ -240,7 +219,7 @@ public partial class CategoryExporter(DiscordClient discord)
                         channel,
                         threadsById,
                         threadAnchorsByThreadId,
-                        registry,
+                        assetDownloader,
                         tempWriter,
                         channelProgress,
                         cancellationToken
@@ -283,27 +262,21 @@ public partial class CategoryExporter(DiscordClient discord)
             var shellContext = new ExportContext(
                 discord,
                 CreateSyntheticRequest(request, request.Category),
-                registry
+                assetDownloader
             );
 
             await using (var outputWriter = new StreamWriter(File.Create(request.OutputFilePath)))
             {
                 await outputWriter.WriteLineAsync(
                     Minify(
-                        NeutralizeAssetPlaceholders(
-                            await new CategoryPreambleTemplate
-                            {
-                                Context = shellContext,
-                                ThemeName = themeName,
-                                Registry = registry,
-                                SidebarItems = sidebarItems,
-                            }.RenderAsync(cancellationToken)
-                        )
+                        await new CategoryPreambleTemplate
+                        {
+                            Context = shellContext,
+                            ThemeName = themeName,
+                            SidebarItems = sidebarItems,
+                        }.RenderAsync(cancellationToken)
                     )
                 );
-
-                // Flush the assets registered while rendering the shell (e.g. the guild icon)
-                await WriteAssetScriptAsync(outputWriter, registry.DrainPendingEntries());
 
                 // Copy the chatlog sections from the temporary file
                 await outputWriter.FlushAsync(cancellationToken);
@@ -360,31 +333,4 @@ public partial class CategoryExporter
             locale: null,
             isUtcNormalizationEnabled: false
         );
-
-    private static async ValueTask WriteAssetScriptAsync(
-        TextWriter writer,
-        IReadOnlyList<KeyValuePair<string, string>> entries
-    )
-    {
-        if (entries.Count == 0)
-            return;
-
-        // Written directly, bypassing the minifier, to avoid feeding huge base64 payloads to it
-        await writer.WriteAsync("<script>(() => { const assets = window.__ASSETS ??= {}; ");
-
-        foreach (var (key, dataUri) in entries)
-        {
-            await writer.WriteAsync("assets[\"");
-            await writer.WriteAsync(key);
-            await writer.WriteAsync("\"] = \"");
-            await writer.WriteAsync(EncodeJavaScriptStringContent(dataUri));
-            await writer.WriteAsync("\"; ");
-        }
-
-        await writer.WriteLineAsync("})()</script>");
-    }
-
-    // Data URIs are mostly base64, but escape defensively in case a fallback URL slips through
-    private static string EncodeJavaScriptStringContent(string value) =>
-        value.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("</", "<\\/");
 }

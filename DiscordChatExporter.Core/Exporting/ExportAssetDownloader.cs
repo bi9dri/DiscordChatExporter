@@ -13,7 +13,11 @@ using PowerKit.Extensions;
 
 namespace DiscordChatExporter.Core.Exporting;
 
-internal partial class ExportAssetDownloader(string workingDirPath, bool reuse)
+internal partial class ExportAssetDownloader(
+    string workingDirPath,
+    bool reuse,
+    bool convertImagesToWebp = false
+)
 {
     private static readonly AsyncKeyedLocker<string> Locker = new();
 
@@ -25,7 +29,14 @@ internal partial class ExportAssetDownloader(string workingDirPath, bool reuse)
         CancellationToken cancellationToken = default
     )
     {
-        var fileName = GetFileNameFromUrl(url);
+        var downloadUrl = convertImagesToWebp ? GetWebpVariantUrl(url) : url;
+
+        // The extension must match what the CDN actually serves, which may differ from
+        // the original URL after the WebP rewrite (e.g. .gif becomes an animated .webp)
+        var fileName = GetFileNameFromUrl(
+            url,
+            extensionOverride: convertImagesToWebp ? GetWebpExtension(url) : null
+        );
         var filePath = Path.Combine(workingDirPath, fileName);
 
         using var _ = await Locker.LockAsync(filePath, cancellationToken);
@@ -40,7 +51,9 @@ internal partial class ExportAssetDownloader(string workingDirPath, bool reuse)
         // Check for a file cached by the legacy naming scheme (5-char hash) and rename it
         // to the new naming scheme to preserve backwards compatibility with existing exports.
         // This will catch both the 5-char lowercase hash and the 5-char uppercase hash variants.
-        if (reuse)
+        // ponytail: the legacy names never used a WebP extension override, so don't attempt
+        // legacy reuse when converting
+        if (reuse && !convertImagesToWebp)
         {
             var legacyFileNames = GetLegacyFileNamesFromUrl(url);
             foreach (var legacyFileName in legacyFileNames)
@@ -71,7 +84,7 @@ internal partial class ExportAssetDownloader(string workingDirPath, bool reuse)
             {
                 // Download the file
                 using var response = await Http.Client.GetAsync(
-                    url,
+                    downloadUrl,
                     HttpCompletionOption.ResponseHeadersRead,
                     innerCancellationToken
                 );
@@ -111,7 +124,7 @@ internal partial class ExportAssetDownloader
         return uri.GetLeftPart(UriPartial.Path) + query;
     }
 
-    private static string GetFileNameFromUrl(string url, string urlHash)
+    private static string GetFileNameFromUrl(string url, string urlHash, string? extensionOverride)
     {
         // Try to extract the file name from URL
         var fileName = new Uri(url, UriKind.RelativeOrAbsolute).TryGetFileName();
@@ -122,7 +135,7 @@ internal partial class ExportAssetDownloader
 
         // Otherwise, use the original file name but inject the hash in the middle
         var fileNameWithoutExtension = Path.GetFileNameWithoutExtension(fileName);
-        var fileExtension = Path.GetExtension(fileName);
+        var fileExtension = extensionOverride ?? Path.GetExtension(fileName);
 
         // Probably not a file extension, just a dot in a long file name
         // https://github.com/Tyrrrz/DiscordChatExporter/pull/812
@@ -144,7 +157,18 @@ internal partial class ExportAssetDownloader
             SHA256
                 .HashData(Encoding.UTF8.GetBytes(NormalizeUrl(url)))
                 .Pipe(Convert.ToHexStringLower)
-                .Truncate(16)
+                .Truncate(16),
+            null
+        );
+
+    private static string GetFileNameFromUrl(string url, string? extensionOverride) =>
+        GetFileNameFromUrl(
+            url,
+            SHA256
+                .HashData(Encoding.UTF8.GetBytes(NormalizeUrl(url)))
+                .Pipe(Convert.ToHexStringLower)
+                .Truncate(16),
+            extensionOverride
         );
 
     // Legacy naming used a 5-char hash, kept for backwards compatibility with existing exports
@@ -155,9 +179,60 @@ internal partial class ExportAssetDownloader
         return
         [
             // Lowercase variant (introduced in 2.46.1)
-            GetFileNameFromUrl(url, Convert.ToHexStringLower(hashData).Truncate(5)),
+            GetFileNameFromUrl(url, Convert.ToHexStringLower(hashData).Truncate(5), null),
             // Uppercase variant (original)
-            GetFileNameFromUrl(url, Convert.ToHexString(hashData).Truncate(5)),
+            GetFileNameFromUrl(url, Convert.ToHexString(hashData).Truncate(5), null),
         ];
     }
+
+    // Discord's media proxy can transcode images to WebP on the fly, which is what the
+    // official client does as well. External images (Twitter, YouTube thumbnails, etc.)
+    // are not served by Discord, so they're kept as-is.
+    private static bool CanConvertToWebp(Uri uri) => IsDiscordAssetHost(uri.Host);
+
+    // Animated assets are served as static WebP unless explicitly requested otherwise,
+    // so the query needs an extra parameter that has no effect on static images.
+    private static bool IsAnimated(Uri uri) =>
+        // Animated user assets are flagged in their hash, animated attachments are not
+        Path.GetFileNameWithoutExtension(uri.AbsolutePath)
+            .StartsWith("a_", StringComparison.Ordinal)
+        // Animated attachments: .gif (Discord re-serves them as animated WebP)
+        || string.Equals(
+            Path.GetExtension(uri.AbsolutePath),
+            ".gif",
+            StringComparison.OrdinalIgnoreCase
+        );
+
+    private static string GetWebpVariantUrl(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || !CanConvertToWebp(uri))
+            return url;
+
+        var builder = new UriBuilder(uri) { Host = "media.discordapp.net" };
+
+        var query = HttpUtility.ParseQueryString(builder.Query);
+        query["format"] = "webp";
+
+        if (IsAnimated(uri))
+            query["animated"] = "true";
+
+        // Non-null: the assignments above guarantee at least one parameter
+        builder.Query = query.ToString()!;
+
+        return builder.Uri.AbsoluteUri;
+    }
+
+    // Animated assets keep their original extension: Discord serves them as .webp, but
+    // relying on the extension matching the bytes is only safe for the static case, and
+    // a wrong extension only affects the subresource MIME sniff, not rendering.
+    private static string? GetWebpExtension(string url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var uri)
+        && CanConvertToWebp(uri)
+        && !IsAnimated(uri)
+            ? ".webp"
+            : null;
+
+    private static bool IsDiscordAssetHost(string host) =>
+        host.EndsWith(".discordapp.net", StringComparison.OrdinalIgnoreCase)
+        || host.EndsWith(".discordapp.com", StringComparison.OrdinalIgnoreCase);
 }
